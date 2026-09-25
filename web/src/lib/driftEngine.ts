@@ -155,8 +155,12 @@ function parseDocContracts(docContent: string): DocContracts {
       }
     }
 
-    // Auth detection
-    if (currentEndpoint && (authMethodRe.test(line) || cookieAuthRe.test(line) || bearerAuthRe.test(line))) {
+    // Auth detection — only on lines that explicitly declare an auth method or
+    // auth header (not arbitrary prose that happens to mention "session").
+    const isAuthLine =
+      authMethodRe.test(line) ||
+      /^\s*-\s*(Cookie|Authorization|Set-Cookie)\s*:/i.test(line);
+    if (currentEndpoint && isAuthLine) {
       if (cookieAuthRe.test(line) && !bearerAuthRe.test(line)) {
         auth.push({ scheme: "cookie", line: lineNum, endpoint: currentEndpoint });
       } else if (bearerAuthRe.test(line)) {

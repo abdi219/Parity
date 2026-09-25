@@ -6,6 +6,7 @@ import { runDriftAudit, AuditReport } from "@/lib/driftEngine";
 interface RequestBody {
   target: "demo" | "custom";
   repoUrl?: string;
+  patchedDocContent?: string;
 }
 
 function errorResponse(status: number, message: string): NextResponse<{ error: string }> {
@@ -60,8 +61,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<AuditReport |
     return errorResponse(500, `Failed to read demo service files: ${message}`);
   }
 
+  const { patchedDocContent } = body as RequestBody;
+  const effectiveDoc = typeof patchedDocContent === "string" ? patchedDocContent : docContent;
+
   const report = runDriftAudit(
-    docContent,
+    effectiveDoc,
     codeContent,
     "dummy-auth-service/README.md",
     "dummy-auth-service/src/auth.ts",
