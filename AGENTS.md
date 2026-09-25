@@ -1,8 +1,8 @@
-# AGENTS.md — DriftGuard Context
+# AGENTS.md — Parity Context
 
-## What is DriftGuard?
+## What is Parity?
 
-DriftGuard is an evidence-backed documentation-to-code drift verification tool built for a hackathon. It inspects documentation (`README.md`) against actual backend route handlers (`auth.ts`), detects contradictions with exact line citations, and generates unified markdown diffs.
+Parity is an evidence-backed documentation-to-code drift verification tool built for a hackathon. It inspects documentation (`README.md`) against actual backend route handlers (`auth.ts`), detects contradictions with exact line citations, and generates unified markdown diffs.
 
 ## Engineering Invariants
 
