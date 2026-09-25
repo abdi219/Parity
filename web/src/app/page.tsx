@@ -10,8 +10,9 @@ import { applyPatches, type UnifiedDiffLine } from "@/lib/patchEngine";
 
 type AuditState = "idle" | "scanning" | "done" | "error";
 type PatchState = "idle" | "applying" | "reauditing" | "verified" | "error";
+type Mode = "demo" | "custom";
 
-const SCAN_STEPS = [
+const DEMO_STEPS = [
   "Resolving target: dummy-auth-service",
   "Reading dummy-auth-service/README.md",
   "Reading dummy-auth-service/src/auth.ts",
@@ -29,6 +30,20 @@ const REAUDIT_STEPS = [
   "Comparing patched documentation against code contracts",
   "Verification complete",
 ] as const;
+
+function buildCustomSteps(repoUrl: string, docPath: string, codePath: string): readonly string[] {
+  const label = repoUrl.replace("https://github.com/", "").replace(/\/$/, "") || "repo";
+  return [
+    `Resolving target: ${label}`,
+    `Fetching ${docPath} from raw.githubusercontent.com`,
+    `Fetching ${codePath} from raw.githubusercontent.com`,
+    "Parsing documentation contracts (routes, params, auth, responses)",
+    "Parsing code contracts (interfaces, handlers, response shapes)",
+    "Running drift comparison across 4 contract categories",
+    "Generating findings with line-level provenance",
+    "Audit complete",
+  ] as const;
+}
 
 // ---------------------------------------------------------------------------
 // Icons — functional SVG only, no decoration
@@ -76,7 +91,7 @@ function SeverityBadge({ severity }: { severity: DriftFinding["severity"] }) {
   return (
     <span
       className={[
-        "inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold tracking-wider border",
+        "inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold tracking-wider border shrink-0",
         isCritical
           ? "bg-red-950 border-red-800 text-red-300"
           : "bg-amber-950 border-amber-800 text-amber-300",
@@ -94,7 +109,7 @@ function SeverityBadge({ severity }: { severity: DriftFinding["severity"] }) {
 
 function TypeBadge({ type }: { type: DriftFinding["type"] }) {
   return (
-    <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono border border-zinc-700 bg-zinc-900 text-zinc-400 tracking-wider">
+    <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono border border-zinc-700 bg-zinc-900 text-zinc-400 tracking-wider shrink-0">
       {type}
     </span>
   );
@@ -108,27 +123,25 @@ function DriftCard({ finding }: { finding: DriftFinding }) {
   return (
     <article className="border border-zinc-800 rounded-sm overflow-hidden">
       {/* Header */}
-      <div className="flex items-center justify-between gap-3 px-3 py-2 bg-zinc-900 border-b border-zinc-800">
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="font-mono text-xs text-zinc-500 shrink-0">{finding.id}</span>
-          <span className="text-zinc-700 text-xs shrink-0">/</span>
-          <span className="font-mono text-xs text-zinc-300 truncate">{finding.endpoint}</span>
-        </div>
-        <div className="flex items-center gap-2 shrink-0">
+      <div className="flex flex-wrap items-center gap-2 px-3 py-2 bg-zinc-900 border-b border-zinc-800">
+        <span className="font-mono text-xs text-zinc-500 shrink-0">{finding.id}</span>
+        <span className="text-zinc-700 text-xs shrink-0 hidden sm:inline">/</span>
+        <span className="font-mono text-xs text-zinc-300 truncate min-w-0 flex-1">{finding.endpoint}</span>
+        <div className="flex items-center gap-2 shrink-0 ml-auto flex-wrap">
           <TypeBadge type={finding.type} />
           <SeverityBadge severity={finding.severity} />
         </div>
       </div>
 
-      {/* Side-by-side comparison */}
-      <div className="grid grid-cols-2 divide-x divide-zinc-800">
+      {/* Side-by-side comparison — stacks on mobile */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 sm:divide-x divide-zinc-800">
         {/* Doc side */}
-        <div className="p-3 space-y-1.5">
+        <div className="p-3 space-y-1.5 border-b border-zinc-800 sm:border-b-0">
           <div className="flex items-center gap-1.5 text-[10px] font-mono text-zinc-500 uppercase tracking-widest">
             <span className="text-red-500">-</span>
             Documentation
           </div>
-          <p className="font-mono text-[10px] text-zinc-500">
+          <p className="font-mono text-[10px] text-zinc-500 break-all">
             {finding.documentationFile}:{finding.documentationLine}
           </p>
           <p className="font-mono text-xs text-red-300 bg-red-950/30 border border-red-900/40 rounded px-2 py-1.5 leading-5 whitespace-pre-wrap break-words">
@@ -142,7 +155,7 @@ function DriftCard({ finding }: { finding: DriftFinding }) {
             <span className="text-emerald-500">+</span>
             Code Reality
           </div>
-          <p className="font-mono text-[10px] text-zinc-500">
+          <p className="font-mono text-[10px] text-zinc-500 break-all">
             {finding.codeFile}:{finding.codeLine}
           </p>
           <p className="font-mono text-xs text-emerald-300 bg-emerald-950/30 border border-emerald-900/40 rounded px-2 py-1.5 leading-5 whitespace-pre-wrap break-words">
@@ -214,7 +227,10 @@ function TerminalBox({
               <span className={isPast ? "text-emerald-500" : isCurrent ? "text-zinc-400 animate-pulse" : "text-zinc-700"}>
                 {isPast ? ">" : isCurrent ? ">" : " "}
               </span>
-              <span className={isPast ? "text-zinc-300" : isCurrent ? "text-zinc-400" : "text-zinc-700"}>
+              <span className={[
+                "break-all",
+                isPast ? "text-zinc-300" : isCurrent ? "text-zinc-400" : "text-zinc-700",
+              ].join(" ")}>
                 {line}
               </span>
             </div>
@@ -222,8 +238,8 @@ function TerminalBox({
         })}
         {error && (
           <div className="flex items-start gap-2 mt-1">
-            <span className="text-red-500">!</span>
-            <span className="text-red-400">{error}</span>
+            <span className="text-red-500 shrink-0">!</span>
+            <span className="text-red-400 break-all">{error}</span>
           </div>
         )}
         <div ref={bottomRef} />
@@ -236,16 +252,16 @@ function TerminalBox({
 // Unified diff viewer
 // ---------------------------------------------------------------------------
 
-function DiffViewer({ diff }: { diff: UnifiedDiffLine[] }) {
+function DiffViewer({ diff, docFile }: { diff: UnifiedDiffLine[]; docFile: string }) {
   if (diff.length === 0) return null;
 
   return (
     <div className="border border-zinc-800 rounded-sm overflow-hidden">
-      <div className="px-3 py-2 bg-zinc-900 border-b border-zinc-800 flex items-center justify-between">
-        <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest">
-          Unified Diff — dummy-auth-service/README.md
+      <div className="px-3 py-2 bg-zinc-900 border-b border-zinc-800 flex flex-wrap items-center gap-2 justify-between">
+        <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest truncate min-w-0">
+          Unified Diff — {docFile}
         </span>
-        <span className="text-[10px] font-mono text-zinc-600">
+        <span className="text-[10px] font-mono text-zinc-600 shrink-0">
           {diff.filter((l) => l.kind === "removed").length} removed&nbsp;&nbsp;
           {diff.filter((l) => l.kind === "added").length} added
         </span>
@@ -259,7 +275,7 @@ function DiffViewer({ diff }: { diff: UnifiedDiffLine[] }) {
             <div
               key={i}
               className={[
-                "flex items-start font-mono text-[11px] leading-5 px-0",
+                "flex items-start font-mono text-[11px] leading-5",
                 isRemoved ? "bg-red-950/25" : isAdded ? "bg-emerald-950/25" : "",
               ].join(" ")}
             >
@@ -295,7 +311,7 @@ function DiffViewer({ diff }: { diff: UnifiedDiffLine[] }) {
 
 function AuditSummary({ report }: { report: AuditReport }) {
   return (
-    <div className="border border-zinc-800 rounded-sm bg-zinc-900 px-4 py-3 flex flex-wrap items-center gap-x-6 gap-y-2">
+    <div className="border border-zinc-800 rounded-sm bg-zinc-900 px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-2">
       <div className="flex items-center gap-2">
         {report.isClean ? (
           <span className="text-emerald-400"><IconCheck /></span>
@@ -306,25 +322,25 @@ function AuditSummary({ report }: { report: AuditReport }) {
           {report.isClean ? "No drift detected" : `${report.driftCount} drift${report.driftCount !== 1 ? "s" : ""} detected`}
         </span>
       </div>
-      <Divider />
+      <span className="text-zinc-700 select-none hidden sm:inline">|</span>
       <Stat label="Repository" value={report.targetRepository} mono />
-      <Divider />
+      <span className="text-zinc-700 select-none hidden sm:inline">|</span>
       <Stat label="Checks run" value={String(report.totalChecks)} mono />
-      <Divider />
+      <span className="text-zinc-700 select-none hidden sm:inline">|</span>
       <Stat label="Timestamp" value={new Date(report.timestamp).toISOString()} mono />
     </div>
   );
 }
 
 function Divider() {
-  return <span className="text-zinc-700 select-none">|</span>;
+  return <span className="text-zinc-700 select-none hidden sm:inline">|</span>;
 }
 
 function Stat({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
   return (
-    <div className="flex items-center gap-1.5">
-      <span className="text-[10px] text-zinc-500 uppercase tracking-widest">{label}</span>
-      <span className={`text-xs text-zinc-300 ${mono ? "font-mono" : ""}`}>{value}</span>
+    <div className="flex items-center gap-1.5 min-w-0">
+      <span className="text-[10px] text-zinc-500 uppercase tracking-widest shrink-0">{label}</span>
+      <span className={`text-xs text-zinc-300 truncate ${mono ? "font-mono" : ""}`}>{value}</span>
     </div>
   );
 }
@@ -374,8 +390,8 @@ const FAQ_ITEMS = [
     a: "Every finding carries exact 1-based line numbers for both the documentation file and the code file. The parser tracks line offsets while scanning and records the specific line at which each claim or reality was found — there are no approximations or averages.",
   },
   {
-    q: "Is any data sent to an external service?",
-    a: "No. The entire audit pipeline runs inside the Next.js server route handler using only Node.js built-ins (fs.promises). No external APIs, no telemetry, no network calls after the browser posts to /api/audit.",
+    q: "Which GitHub repositories can I audit?",
+    a: "Any public GitHub repository. Paste a URL such as https://github.com/owner/repo. Parity fetches the raw files from raw.githubusercontent.com, probing the main branch first then master as fallback. Private repositories are not supported.",
   },
   {
     q: "How does the patch-and-re-audit loop work?",
@@ -421,7 +437,13 @@ function FaqAccordion() {
 // ---------------------------------------------------------------------------
 
 export default function Home() {
+  const [mode, setMode] = useState<Mode>("demo");
+  const [repoUrl, setRepoUrl] = useState("");
+  const [customDocPath, setCustomDocPath] = useState("README.md");
+  const [customCodePath, setCustomCodePath] = useState("src/auth.ts");
+
   const [auditState, setAuditState] = useState<AuditState>("idle");
+  const [scanSteps, setScanSteps] = useState<readonly string[]>(DEMO_STEPS);
   const [scanStep, setScanStep] = useState(0);
   const [report, setReport] = useState<AuditReport | null>(null);
   const [originalDoc, setOriginalDoc] = useState<string | null>(null);
@@ -430,25 +452,49 @@ export default function Home() {
   const [patchState, setPatchState] = useState<PatchState>("idle");
   const [patchStep, setPatchStep] = useState(0);
   const [diff, setDiff] = useState<UnifiedDiffLine[]>([]);
+  const [diffDocFile, setDiffDocFile] = useState("dummy-auth-service/README.md");
   const [verifiedReport, setVerifiedReport] = useState<AuditReport | null>(null);
   const [patchErrorMsg, setPatchErrorMsg] = useState<string | null>(null);
 
-  async function runDemoAudit() {
-    if (auditState === "scanning") return;
-
-    setAuditState("scanning");
+  function resetState() {
     setReport(null);
     setOriginalDoc(null);
     setErrorMsg(null);
     setScanStep(0);
-    // Reset patch state on fresh audit
     setPatchState("idle");
     setDiff([]);
     setVerifiedReport(null);
     setPatchErrorMsg(null);
+  }
+
+  async function runAudit() {
+    if (auditState === "scanning") return;
+
+    if (mode === "custom") {
+      const trimmed = repoUrl.trim();
+      if (!trimmed) {
+        setErrorMsg("Enter a GitHub repository URL to audit.");
+        setAuditState("error");
+        return;
+      }
+      if (!trimmed.startsWith("https://github.com/")) {
+        setErrorMsg(`Invalid URL. Expected: https://github.com/owner/repo`);
+        setAuditState("error");
+        return;
+      }
+    }
+
+    resetState();
+    setAuditState("scanning");
+
+    const steps =
+      mode === "custom"
+        ? buildCustomSteps(repoUrl, customDocPath || "README.md", customCodePath || "src/auth.ts")
+        : DEMO_STEPS;
+    setScanSteps(steps);
 
     let stepIndex = 0;
-    const totalSteps = SCAN_STEPS.length - 1;
+    const totalSteps = steps.length - 1;
 
     const interval = setInterval(() => {
       stepIndex = Math.min(stepIndex + 1, totalSteps - 1);
@@ -456,10 +502,20 @@ export default function Home() {
     }, 260);
 
     try {
+      const body =
+        mode === "demo"
+          ? { target: "demo" }
+          : {
+              target: "custom",
+              repoUrl: repoUrl.trim(),
+              docPath: customDocPath.trim() || "README.md",
+              codePath: customCodePath.trim() || "src/auth.ts",
+            };
+
       const res = await fetch("/api/audit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ target: "demo" }),
+        body: JSON.stringify(body),
       });
 
       clearInterval(interval);
@@ -469,7 +525,7 @@ export default function Home() {
         throw new Error(data.error ?? `HTTP ${res.status}`);
       }
 
-      const data = (await res.json()) as AuditReport & { _docContent?: string };
+      const data = (await res.json()) as AuditReport;
       setScanStep(totalSteps);
       setReport(data);
       setAuditState("done");
@@ -500,18 +556,13 @@ export default function Home() {
     }, 300);
 
     try {
-      // Step 1: fetch original doc content from the API to patch against.
-      // We do this by requesting a fresh demo audit which returns the report;
-      // the original doc content is fetched separately via a second call so we
-      // always have the unmodified source.
-      const docRes = await fetch("/api/doc-source");
+      const docRes = await fetch("/api/audit-source");
       let sourceDoc: string;
 
       if (docRes.ok) {
         const srcData = (await docRes.json()) as { docContent?: string };
         sourceDoc = srcData.docContent ?? "";
       } else {
-        // Fall back: use the cached originalDoc if available.
         sourceDoc = originalDoc ?? "";
       }
 
@@ -519,12 +570,11 @@ export default function Home() {
         throw new Error("Could not retrieve original documentation source for patching.");
       }
 
-      // Step 2: apply patches in memory (pure client-side).
       const { patchedDoc, diff: patchDiff } = applyPatches(sourceDoc, report.findings);
       setDiff(patchDiff);
+      setDiffDocFile(report.findings[0]?.documentationFile ?? "README.md");
       setPatchState("reauditing");
 
-      // Step 3: send patched doc content to the API for re-audit.
       const reauditRes = await fetch("/api/audit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -545,7 +595,6 @@ export default function Home() {
         setVerifiedReport(reauditData);
         setPatchState("verified");
       } else {
-        // Unexpected: patches did not resolve all findings.
         setPatchErrorMsg(
           `Re-audit returned ${reauditData.driftCount} unresolved finding${reauditData.driftCount !== 1 ? "s" : ""}.`
         );
@@ -559,17 +608,8 @@ export default function Home() {
     }
   }
 
-  // The API does not expose a /doc-source endpoint yet; we load originalDoc
-  // from the audit response via a parallel fetch of the raw file content.
-  // To avoid adding another endpoint, we fetch it via the audit route using
-  // a probe call and capture what the patchEngine needs from page state.
-  // When the initial audit completes, also fetch the raw doc for patching.
   useEffect(() => {
     if (auditState !== "done" || originalDoc !== null) return;
-
-    // Fetch the source doc content for use by the patcher.
-    // We call /api/audit-source which we define below; if unavailable we
-    // fall back to the embedded known content for the demo.
     fetch("/api/audit-source", { method: "GET" })
       .then(async (r) => {
         if (!r.ok) throw new Error("source unavailable");
@@ -577,16 +617,24 @@ export default function Home() {
         setOriginalDoc(d.docContent);
       })
       .catch(() => {
-        // Hard-coded fallback — the demo doc is known and static.
         setOriginalDoc(DEMO_DOC_FALLBACK);
       });
   }, [auditState, originalDoc]);
 
+  const isBusy = auditState === "scanning";
+  const canPatch =
+    report !== null &&
+    auditState === "done" &&
+    report.findings.length > 0 &&
+    mode === "demo" &&
+    patchState === "idle";
+
   return (
-    <div className="min-h-screen bg-zinc-950 text-white">
+    <div className="min-h-screen flex flex-col bg-zinc-950 text-white">
+
       {/* Nav */}
       <nav className="border-b border-zinc-800 bg-zinc-950 sticky top-0 z-10">
-        <div className="max-w-5xl mx-auto px-4 h-11 flex items-center justify-between">
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 h-11 flex items-center justify-between">
           <span className="font-mono text-sm font-semibold tracking-tight text-white">
             Parity
           </span>
@@ -597,7 +645,8 @@ export default function Home() {
         </div>
       </nav>
 
-      <main className="max-w-5xl mx-auto px-4 py-8 space-y-8">
+      {/* Main — flex-1 pushes footer to bottom */}
+      <main className="flex-1 max-w-5xl w-full mx-auto px-4 sm:px-6 py-8 space-y-8">
 
         {/* Header */}
         <header className="space-y-1">
@@ -609,33 +658,103 @@ export default function Home() {
           </p>
         </header>
 
+        {/* Mode tabs */}
+        <div className="flex items-center border border-zinc-800 rounded-sm overflow-hidden w-fit">
+          {(["demo", "custom"] as Mode[]).map((m) => (
+            <button
+              key={m}
+              onClick={() => { setMode(m); resetState(); setAuditState("idle"); }}
+              className={[
+                "px-4 h-8 font-mono text-xs font-semibold transition-colors",
+                mode === m
+                  ? "bg-zinc-800 text-white"
+                  : "bg-zinc-950 text-zinc-500 hover:text-zinc-300",
+                m === "custom" ? "border-l border-zinc-800" : "",
+              ].join(" ")}
+            >
+              {m === "demo" ? "Demo" : "Public Repo"}
+            </button>
+          ))}
+        </div>
+
         {/* Control bar */}
-        <section className="flex items-center gap-3">
-          <div className="flex-1 border border-zinc-800 rounded-sm bg-zinc-900 px-3 h-9 flex items-center">
-            <span className="font-mono text-xs text-zinc-500 select-none mr-2">target</span>
-            <span className="font-mono text-xs text-zinc-300">dummy-auth-service</span>
-            <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono border border-zinc-700 text-zinc-500 bg-zinc-950">
-              demo
-            </span>
-          </div>
-          <button
-            onClick={runDemoAudit}
-            disabled={auditState === "scanning"}
-            className={[
-              "h-9 px-4 rounded-sm font-mono text-xs font-semibold border transition-colors shrink-0",
-              auditState === "scanning"
-                ? "border-zinc-700 text-zinc-600 bg-zinc-900 cursor-not-allowed"
-                : "border-zinc-600 text-white bg-zinc-900 hover:bg-zinc-800 hover:border-zinc-500 cursor-pointer",
-            ].join(" ")}
-          >
-            {auditState === "scanning" ? "Scanning..." : "Inspect Auth Service (Demo)"}
-          </button>
-        </section>
+        {mode === "demo" ? (
+          <section className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+            <div className="flex-1 border border-zinc-800 rounded-sm bg-zinc-900 px-3 h-9 flex items-center min-w-0">
+              <span className="font-mono text-xs text-zinc-500 select-none mr-2 shrink-0">target</span>
+              <span className="font-mono text-xs text-zinc-300 truncate">dummy-auth-service</span>
+              <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono border border-zinc-700 text-zinc-500 bg-zinc-950 shrink-0">
+                local
+              </span>
+            </div>
+            <button
+              onClick={runAudit}
+              disabled={isBusy}
+              className={[
+                "h-9 px-4 rounded-sm font-mono text-xs font-semibold border transition-colors shrink-0",
+                isBusy
+                  ? "border-zinc-700 text-zinc-600 bg-zinc-900 cursor-not-allowed"
+                  : "border-zinc-600 text-white bg-zinc-900 hover:bg-zinc-800 hover:border-zinc-500 cursor-pointer",
+              ].join(" ")}
+            >
+              {isBusy ? "Scanning..." : "Inspect Auth Service (Demo)"}
+            </button>
+          </section>
+        ) : (
+          <section className="space-y-3">
+            <div className="flex flex-col sm:flex-row gap-3">
+              <input
+                type="url"
+                value={repoUrl}
+                onChange={(e) => setRepoUrl(e.target.value)}
+                placeholder="https://github.com/owner/repo"
+                disabled={isBusy}
+                className="flex-1 h-9 px-3 rounded-sm border border-zinc-800 bg-zinc-900 font-mono text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-zinc-600 disabled:opacity-50 min-w-0"
+              />
+              <button
+                onClick={runAudit}
+                disabled={isBusy}
+                className={[
+                  "h-9 px-4 rounded-sm font-mono text-xs font-semibold border transition-colors shrink-0",
+                  isBusy
+                    ? "border-zinc-700 text-zinc-600 bg-zinc-900 cursor-not-allowed"
+                    : "border-zinc-600 text-white bg-zinc-900 hover:bg-zinc-800 hover:border-zinc-500 cursor-pointer",
+                ].join(" ")}
+              >
+                {isBusy ? "Fetching..." : "Audit Public Repo"}
+              </button>
+            </div>
+            <div className="flex flex-col sm:flex-row gap-3">
+              <div className="flex-1 flex items-center gap-2 min-w-0">
+                <span className="font-mono text-[10px] text-zinc-600 uppercase tracking-widest shrink-0">doc</span>
+                <input
+                  type="text"
+                  value={customDocPath}
+                  onChange={(e) => setCustomDocPath(e.target.value)}
+                  placeholder="README.md"
+                  disabled={isBusy}
+                  className="flex-1 h-8 px-2 rounded-sm border border-zinc-800 bg-zinc-900 font-mono text-xs text-zinc-300 placeholder-zinc-600 focus:outline-none focus:border-zinc-600 disabled:opacity-50 min-w-0"
+                />
+              </div>
+              <div className="flex-1 flex items-center gap-2 min-w-0">
+                <span className="font-mono text-[10px] text-zinc-600 uppercase tracking-widest shrink-0">code</span>
+                <input
+                  type="text"
+                  value={customCodePath}
+                  onChange={(e) => setCustomCodePath(e.target.value)}
+                  placeholder="src/auth.ts"
+                  disabled={isBusy}
+                  className="flex-1 h-8 px-2 rounded-sm border border-zinc-800 bg-zinc-900 font-mono text-xs text-zinc-300 placeholder-zinc-600 focus:outline-none focus:border-zinc-600 disabled:opacity-50 min-w-0"
+                />
+              </div>
+            </div>
+          </section>
+        )}
 
         {/* Initial scan terminal */}
         {auditState !== "idle" && (
           <TerminalBox
-            steps={SCAN_STEPS}
+            steps={scanSteps}
             step={scanStep}
             done={auditState === "done" || auditState === "error"}
             error={auditState === "error" ? errorMsg : null}
@@ -651,11 +770,11 @@ export default function Home() {
         {/* Drift matrix */}
         {report && auditState === "done" && report.findings.length > 0 && (
           <section className="space-y-3">
-            <div className="flex items-center justify-between gap-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <h2 className="text-xs font-mono text-zinc-500 uppercase tracking-widest">
                 Drift Matrix — {report.driftCount} finding{report.driftCount !== 1 ? "s" : ""}
               </h2>
-              {patchState === "idle" && (
+              {canPatch && (
                 <button
                   onClick={runApplyAndReaudit}
                   className="h-8 px-4 rounded-sm font-mono text-xs font-semibold border border-zinc-600 text-white bg-zinc-900 hover:bg-zinc-800 hover:border-zinc-500 cursor-pointer transition-colors shrink-0"
@@ -689,18 +808,17 @@ export default function Home() {
         {auditState === "error" && errorMsg && (
           <div className="border border-red-900 rounded-sm bg-red-950/20 px-4 py-3 flex items-start gap-2">
             <span className="text-red-400 mt-0.5 shrink-0"><IconAlert /></span>
-            <span className="font-mono text-xs text-red-300">{errorMsg}</span>
+            <span className="font-mono text-xs text-red-300 break-all">{errorMsg}</span>
           </div>
         )}
 
         {/* Patch section */}
-        {(patchState !== "idle") && (
+        {patchState !== "idle" && (
           <section className="space-y-4">
             <h2 className="text-xs font-mono text-zinc-500 uppercase tracking-widest">
               Patch Verification Loop
             </h2>
 
-            {/* Re-audit terminal */}
             <TerminalBox
               steps={REAUDIT_STEPS}
               step={patchStep}
@@ -709,21 +827,18 @@ export default function Home() {
               label="Re-audit Log"
             />
 
-            {/* Unified diff */}
             {diff.length > 0 && (
-              <DiffViewer diff={diff} />
+              <DiffViewer diff={diff} docFile={diffDocFile} />
             )}
 
-            {/* Verified clean banner */}
             {patchState === "verified" && verifiedReport && (
               <VerifiedBanner report={verifiedReport} />
             )}
 
-            {/* Patch error */}
             {patchState === "error" && patchErrorMsg && (
               <div className="border border-red-900 rounded-sm bg-red-950/20 px-4 py-3 flex items-start gap-2">
                 <span className="text-red-400 mt-0.5 shrink-0"><IconAlert /></span>
-                <span className="font-mono text-xs text-red-300">{patchErrorMsg}</span>
+                <span className="font-mono text-xs text-red-300 break-all">{patchErrorMsg}</span>
               </div>
             )}
           </section>
@@ -734,9 +849,9 @@ export default function Home() {
 
       </main>
 
-      {/* Footer */}
-      <footer className="border-t border-zinc-800 mt-16">
-        <div className="max-w-5xl mx-auto px-4 py-4 flex items-center justify-between">
+      {/* Footer — docks to bottom via flex-col on outer wrapper */}
+      <footer className="border-t border-zinc-800">
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 py-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-1">
           <span className="font-mono text-[11px] text-zinc-600">
             Parity — stateless documentation drift verification
           </span>
@@ -745,6 +860,7 @@ export default function Home() {
           </span>
         </div>
       </footer>
+
     </div>
   );
 }
