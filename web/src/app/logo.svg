@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <!-- Pitch Black Canvas with Subtle Dark Zinc Border -->
+  <rect width="32" height="32" rx="7" fill="#000000" />
+  <rect x="0.5" y="0.5" width="31" height="31" rx="6.5" stroke="#27272A" stroke-width="1" />
+
+  <!-- Top Bar: Documentation Contract -->
+  <rect x="7" y="10" width="13" height="3.5" rx="1.75" fill="#A1A1AA" />
+
+  <!-- Bottom Bar: Code Reality (Shifted to show Drift) -->
+  <rect x="12" y="18.5" width="13" height="3.5" rx="1.75" fill="#FFFFFF" />
+
+  <!-- Verification Laser / Audit Line -->
+  <line x1="16" y1="7" x2="16" y2="25" stroke="#FFFFFF" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="2 2" />
+</svg>
