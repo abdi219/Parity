@@ -27,7 +27,7 @@ import type { ContractBundle, ContractEndpoint, HttpMethod } from "@/types/contr
 // Constants
 // ---------------------------------------------------------------------------
 
-const GROQ_MODEL = "llama-3.3-70b-versatile";
+const GROQ_MODEL = "llama-3.1-8b-instant";
 const GROQ_TIMEOUT_MS = 15_000;
 /** Hard cap on characters sent to Groq per code-fragment call. */
 const GROQ_FRAGMENT_MAX_CHARS = 4_000;
