@@ -521,28 +521,28 @@ function VerifiedBanner({ report }: { report: AuditReport }) {
 
 const FAQ_ITEMS = [
   {
-    q: "How does Parity detect drift without running the service?",
-    a: "Parity performs static analysis only. It reads documentation and source files as plain text, extracts contracts via deterministic regex and AST-level parsing, and compares them. No server is started, no network requests to the audited service are made.",
+    q: "What does Parity actually do?",
+    a: "Parity reads your API documentation and your source code side by side, then flags every place they contradict each other — a renamed parameter, a missing endpoint, a changed auth method, or a different response shape. Every finding points to the exact line in both files so you know precisely what to fix.",
   },
   {
-    q: "What are the four supported drift classifications?",
-    a: "ROUTE_MISMATCH: a documented endpoint is absent from the implementation. PARAM_MISMATCH: request body field names differ between documentation and handler. AUTH_MISMATCH: authentication scheme contradicts (e.g. cookie vs Bearer JWT). RESPONSE_MISMATCH: response shape contradicts (raw array vs wrapped object).",
+    q: "Does Parity run or execute my code?",
+    a: "No. Parity never starts a server, imports your modules, or makes requests to your API. It reads source files as plain text and extracts contract information through static analysis. Your code is never executed.",
   },
   {
-    q: "Where do the line numbers come from?",
-    a: "Every finding carries exact 1-based line numbers for both the documentation file and the code file. Extractors track line offsets while scanning and record the specific line at which each claim or implementation reality was found.",
+    q: "What if my documentation is written as plain prose, not structured lists?",
+    a: "Parity first tries to extract endpoints from your docs using pattern matching — which handles tables, code blocks, and bullet lists well. If that finds nothing, it automatically falls back to an AI model that understands conversational descriptions like \"sends a POST request to /api/users\". Either way, the AI never decides whether drift exists; it only helps read the docs.",
   },
   {
-    q: "How does extraction provenance work?",
-    a: "Each contract endpoint is tagged with its extraction method: REGEX (deterministic pattern matching), AST (TypeScript/JavaScript static analysis), GROQ (targeted LLM extraction for ambiguous prose — fallback only), or OPENAPI (parsed from a spec file). The drift engine never uses Groq to decide whether drift exists.",
+    q: "What kinds of problems does Parity catch?",
+    a: "Parity flags four types of drift: a documented route that has no matching handler in the code, request parameters that are named differently in the docs versus the implementation, an authentication method that contradicts (for example, docs say cookie session but code uses a Bearer token), and a response shape mismatch (docs say a plain array, code returns a wrapped object).",
   },
   {
-    q: "How does the patch-and-re-audit loop work?",
-    a: "When you click Apply Recommended Patches, the patch engine runs in-memory. It applies verbatim string replacements to the documentation, generates a unified diff, and sends the patched content to the audit API as patchedDocContent. The server re-runs the drift engine against the patched doc and original code. No disk files are modified.",
+    q: "What API keys do I need?",
+    a: "A free Groq API key is recommended — it powers the AI fallback for prose-heavy documentation and is available at no cost at console.groq.com. For auditing GitHub repositories, a GitHub personal access token is optional but raises your request limit from 60 to 5,000 per hour. Both values go in a .env.local file and are never sent to the browser.",
   },
   {
-    q: "Which GitHub repositories can I audit?",
-    a: "Any public GitHub repository. Parity uses the GitHub Trees API for a single repository discovery request, then fetches only the selected files. The crawl is bounded to 10 source files and 5 documentation files per audit.",
+    q: "How does the \"Apply Patches\" button work?",
+    a: "Clicking Apply Patches updates your documentation in memory — no files on disk are changed. Parity shows you a line-by-line diff of what would change, then immediately re-runs the full audit against the updated text to confirm that all the flagged issues are resolved.",
   },
 ] as const;
 
