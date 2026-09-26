@@ -1,3 +1,21 @@
+/**
+ * Deterministic Drift Engine — Sections 8, 9 & 10
+ *
+ * 100% deterministic: no LLM decides whether drift exists.
+ *
+ * Two entry points:
+ *   1. runDriftAudit()     — legacy single-file interface (demo backward compat)
+ *   2. runNormalizedAudit() — normalized ContractEndpoint comparison (Phase 3)
+ *
+ * Every finding requires concrete source evidence — no finding without proof.
+ */
+
+import type { ContractEndpoint } from "@/types/contract";
+
+// ---------------------------------------------------------------------------
+// Public finding & report types
+// ---------------------------------------------------------------------------
+
 export interface DriftFinding {
   id: string;
   type: "ROUTE_MISMATCH" | "PARAM_MISMATCH" | "AUTH_MISMATCH" | "RESPONSE_MISMATCH";
@@ -20,10 +38,26 @@ export interface AuditReport {
   driftCount: number;
   findings: DriftFinding[];
   isClean: boolean;
+  repoMap?: RepoMap;
 }
 
 // ---------------------------------------------------------------------------
-// Internal contract types — doc side
+// Repository map — Section 13
+// ---------------------------------------------------------------------------
+
+export interface RepoMap {
+  totalFilesDiscovered: number;
+  docFiles: string[];
+  sourceFiles: string[];
+  ignoredDirs: string[];
+  languages: string[];
+  extractionMethods: string[];
+  cappedAt?: number;
+  wasCapped: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Internal contract types — doc side (legacy single-file parser)
 // ---------------------------------------------------------------------------
 
 interface DocRoute {
@@ -39,7 +73,7 @@ interface DocParam {
 }
 
 interface DocAuth {
-  scheme: string; // "cookie" | "bearer" | unknown literal
+  scheme: string;
   line: number;
   endpoint: string;
 }
@@ -58,7 +92,7 @@ interface DocContracts {
 }
 
 // ---------------------------------------------------------------------------
-// Internal contract types — code side
+// Internal contract types — code side (legacy single-file parser)
 // ---------------------------------------------------------------------------
 
 interface CodeRoute {
@@ -76,7 +110,7 @@ interface CodeParam {
 }
 
 interface CodeAuth {
-  scheme: string; // "cookie" | "bearer"
+  scheme: string;
   line: number;
   endpoint: string;
   raw: string;
@@ -97,7 +131,7 @@ interface CodeContracts {
 }
 
 // ---------------------------------------------------------------------------
-// Stage 1 — parse documentation contracts
+// Stage 1 — parse documentation contracts (legacy)
 // ---------------------------------------------------------------------------
 
 function parseDocContracts(docContent: string): DocContracts {
@@ -108,30 +142,20 @@ function parseDocContracts(docContent: string): DocContracts {
   const auth: DocAuth[] = [];
   const responses: DocResponse[] = [];
 
-  // Track the most recently seen route so param/auth/response entries can be
-  // associated with it.
   let currentEndpoint = "";
 
-  // Match: "- Route: POST /api/v1/auth/login" or "Route: GET /api/v1/users"
   const routeRe = /\bRoute:\s*(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(\/\S+)/i;
-  // Match field names inside a JSON-like object block: "username": ...
   const fieldRe = /"([a-zA-Z_][a-zA-Z0-9_]*)"\s*:/g;
-  // Cookie/session auth indicators
   const cookieAuthRe = /session|cookie|Set-Cookie/i;
-  // Bearer/JWT auth indicators
   const bearerAuthRe = /Bearer|JWT|Authorization/i;
-  // Auth method claim line
   const authMethodRe = /Authentication Method:|- Headers?:/i;
-  // Raw array response indicator
   const rawArrayRe = /Returns a raw array|^\s*\[/im;
-  // Wrapped object response indicator
   const wrappedObjectRe = /\{[^}]*\}/;
 
   for (let i = 0; i < lines.length; i++) {
-    const lineNum = i + 1; // 1-based
+    const lineNum = i + 1;
     const line = lines[i];
 
-    // Route detection
     const routeMatch = routeRe.exec(line);
     if (routeMatch) {
       const method = routeMatch[1].toUpperCase();
@@ -141,22 +165,17 @@ function parseDocContracts(docContent: string): DocContracts {
       continue;
     }
 
-    // Param detection — field names inside request body blocks
-    // Only scan lines that look like they are inside a body block
     if (currentEndpoint && /"[a-zA-Z_]/.test(line)) {
       let fieldMatch: RegExpExecArray | null;
       fieldRe.lastIndex = 0;
       while ((fieldMatch = fieldRe.exec(line)) !== null) {
         const name = fieldMatch[1];
-        // Exclude values that are clearly not field names (e.g. "johndoe")
         if (!/^\d/.test(name)) {
           params.push({ name, line: lineNum, endpoint: currentEndpoint });
         }
       }
     }
 
-    // Auth detection — only on lines that explicitly declare an auth method or
-    // auth header (not arbitrary prose that happens to mention "session").
     const isAuthLine =
       authMethodRe.test(line) ||
       /^\s*-\s*(Cookie|Authorization|Set-Cookie)\s*:/i.test(line);
@@ -168,9 +187,7 @@ function parseDocContracts(docContent: string): DocContracts {
       }
     }
 
-    // Response shape detection — look ahead a few lines for the shape
     if (currentEndpoint && /Response\s*\(/.test(line)) {
-      // Scan the next 10 lines for shape indicators
       const window = lines.slice(i + 1, i + 11).join("\n");
       if (rawArrayRe.test(window)) {
         responses.push({ shape: "array", line: lineNum + 1, endpoint: currentEndpoint });
@@ -184,7 +201,7 @@ function parseDocContracts(docContent: string): DocContracts {
 }
 
 // ---------------------------------------------------------------------------
-// Stage 2 — parse code contracts
+// Stage 2 — parse code contracts (legacy)
 // ---------------------------------------------------------------------------
 
 function parseCodeContracts(codeContent: string): CodeContracts {
@@ -195,19 +212,12 @@ function parseCodeContracts(codeContent: string): CodeContracts {
   const auth: CodeAuth[] = [];
   const responses: CodeResponse[] = [];
 
-  // JSDoc route comment: "* POST /api/v1/auth/login"
   const routeCommentRe = /\*\s*(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(\/\S+)/i;
-  // Destructuring from req.body: const { email, password } = req.body
   const destructureRe = /const\s*\{([^}]+)\}\s*=\s*req\.body/;
-  // Interface field inside LoginBody or similar: fieldName: type;
   const interfaceFieldRe = /^\s{2}([a-zA-Z_][a-zA-Z0-9_]*):\s*\w+;/;
-  // Bearer check in code
   const bearerCodeRe = /Bearer/i;
-  // Cookie / session check in code
   const cookieCodeRe = /session|Set-Cookie/i;
-  // res.json wrapped object: res.status(...).json({ key: ... })
   const wrappedJsonRe = /res\.(?:status\(\d+\)\.)?json\(\s*\{/;
-  // res.json raw array: res.status(...).json(someArray) — identifier, not {
   const rawArrayJsonRe = /res\.(?:status\(\d+\)\.)?json\(\s*[A-Z_a-z]/;
 
   let currentEndpoint = "";
@@ -217,15 +227,9 @@ function parseCodeContracts(codeContent: string): CodeContracts {
     const lineNum = i + 1;
     const line = lines[i];
 
-    // Interface boundary tracking
-    if (/interface\s+LoginBody/.test(line)) {
-      insideLoginBody = true;
-    }
-    if (insideLoginBody && /^\}/.test(line)) {
-      insideLoginBody = false;
-    }
+    if (/interface\s+LoginBody/.test(line)) insideLoginBody = true;
+    if (insideLoginBody && /^\}/.test(line)) insideLoginBody = false;
 
-    // Route from JSDoc comment
     const routeMatch = routeCommentRe.exec(line);
     if (routeMatch) {
       const method = routeMatch[1].toUpperCase();
@@ -235,7 +239,6 @@ function parseCodeContracts(codeContent: string): CodeContracts {
       continue;
     }
 
-    // Param — interface fields inside LoginBody
     if (insideLoginBody) {
       const ifMatch = interfaceFieldRe.exec(line);
       if (ifMatch) {
@@ -248,7 +251,6 @@ function parseCodeContracts(codeContent: string): CodeContracts {
       }
     }
 
-    // Param — destructuring from req.body
     if (currentEndpoint && destructureRe.test(line)) {
       const destructureMatch = destructureRe.exec(line);
       if (destructureMatch) {
@@ -259,17 +261,13 @@ function parseCodeContracts(codeContent: string): CodeContracts {
       }
     }
 
-    // Auth — Bearer check
     if (currentEndpoint && bearerCodeRe.test(line) && !cookieCodeRe.test(line)) {
       auth.push({ scheme: "bearer", line: lineNum, endpoint: currentEndpoint, raw: line.trim() });
     }
-
-    // Auth — cookie/session check
     if (currentEndpoint && cookieCodeRe.test(line)) {
       auth.push({ scheme: "cookie", line: lineNum, endpoint: currentEndpoint, raw: line.trim() });
     }
 
-    // Response shape
     if (currentEndpoint) {
       if (wrappedJsonRe.test(line)) {
         responses.push({ shape: "object", line: lineNum, endpoint: currentEndpoint, raw: line.trim() });
@@ -283,7 +281,7 @@ function parseCodeContracts(codeContent: string): CodeContracts {
 }
 
 // ---------------------------------------------------------------------------
-// Stage 3 — detect drift
+// Stage 3 — detect drift (legacy — used by demo & re-audit)
 // ---------------------------------------------------------------------------
 
 function detectDrift(
@@ -299,8 +297,7 @@ function detectDrift(
     return `DRIFT-${String(seq++).padStart(3, "0")}`;
   }
 
-  // -- DRIFT-001: PARAM_MISMATCH (username vs email) -----------------------
-  // Doc claims "username"; code requires "email"
+  // DRIFT-001: PARAM_MISMATCH (username vs email)
   const docUsernameParam = docContracts.params.find((p) => p.name === "username");
   const codeEmailParam = codeContracts.params.find((p) => p.name === "email");
 
@@ -322,16 +319,17 @@ function detectDrift(
     });
   }
 
-  // -- DRIFT-002: AUTH_MISMATCH (Redis cookie vs Bearer JWT) ----------------
-  // Doc claims cookie/session auth; code issues and validates Bearer tokens
+  // DRIFT-002: AUTH_MISMATCH (Redis cookie vs Bearer JWT)
   const docCookieAuth = docContracts.auth.find((a) => a.scheme === "cookie");
   const codeBearerResponse = codeContracts.responses.find(
     (r) => r.shape === "object" && r.endpoint === "POST /api/v1/auth/login"
   );
 
   if (docCookieAuth) {
-    // Find the token_type or access_token line in the code responses as the citation
-    const codeBearerLine = codeBearerResponse?.line ?? codeContracts.auth.find((a) => a.scheme === "bearer")?.line ?? 1;
+    const codeBearerLine =
+      codeBearerResponse?.line ??
+      codeContracts.auth.find((a) => a.scheme === "bearer")?.line ??
+      1;
     const codeBearerRaw =
       codeBearerResponse?.raw ??
       codeContracts.auth.find((a) => a.scheme === "bearer")?.raw ??
@@ -354,8 +352,7 @@ function detectDrift(
     });
   }
 
-  // -- DRIFT-003: RESPONSE_MISMATCH (raw array vs wrapped object) -----------
-  // Doc claims GET /api/v1/users returns a raw array; code wraps in { users, total, page }
+  // DRIFT-003: RESPONSE_MISMATCH (raw array vs wrapped object)
   const docArrayResponse = docContracts.responses.find((r) => r.shape === "array");
   const codeObjectResponse = codeContracts.responses.find(
     (r) => r.shape === "object" && r.endpoint === "GET /api/v1/users"
@@ -383,7 +380,7 @@ function detectDrift(
 }
 
 // ---------------------------------------------------------------------------
-// Stage 4 — public entry point
+// Stage 4 — legacy public entry point (demo & re-audit unchanged)
 // ---------------------------------------------------------------------------
 
 export function runDriftAudit(
@@ -397,8 +394,255 @@ export function runDriftAudit(
   const codeContracts = parseCodeContracts(codeContent);
   const findings = detectDrift(docContracts, codeContracts, docFile, codeFile);
 
-  // totalChecks = number of distinct contract categories evaluated (4: route, param, auth, response)
-  const totalChecks = 4;
+  return {
+    timestamp: new Date().toISOString(),
+    targetRepository,
+    totalChecks: 4,
+    driftCount: findings.length,
+    findings,
+    isClean: findings.length === 0,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Normalized audit — Sections 8 & 9
+// ---------------------------------------------------------------------------
+// Compares two ContractEndpoint arrays deterministically.
+// Every finding requires concrete source evidence from both sides.
+
+/**
+ * Normalize a route path for comparison:
+ * - lowercase
+ * - collapse duplicate slashes
+ * - strip trailing slash (except root "/")
+ * - normalize :param and {param} style placeholders to ":param"
+ */
+function normalizePath(p: string): string {
+  return p
+    .toLowerCase()
+    .replace(/\/+/g, "/")
+    .replace(/\{([^}]+)\}/g, ":$1")
+    .replace(/\/$/, "") || "/";
+}
+
+function normalizeMethod(m: string): string {
+  return m.toUpperCase().trim();
+}
+
+function endpointKey(ep: ContractEndpoint): string {
+  return `${normalizeMethod(ep.method)} ${normalizePath(ep.path)}`;
+}
+
+/** Normalize auth scheme for comparison */
+function normalizeAuth(auth: string | undefined): string {
+  if (!auth || auth === "None") return "none";
+  return auth.toLowerCase().trim();
+}
+
+/** Build a deterministic proposed markdown patch for a single finding */
+function buildProposedPatch(finding: DriftFinding): string {
+  switch (finding.type) {
+    case "ROUTE_MISMATCH":
+      return `- Route: ${finding.documentationClaim}\n+ Route: ${finding.codeReality}`;
+    case "PARAM_MISMATCH":
+      return `- ${finding.documentationClaim}\n+ ${finding.codeReality}`;
+    case "AUTH_MISMATCH":
+      return `- Authentication: ${finding.documentationClaim}\n+ Authentication: ${finding.codeReality}`;
+    case "RESPONSE_MISMATCH":
+      return `- Response: ${finding.documentationClaim}\n+ Response: ${finding.codeReality}`;
+    default:
+      return `- ${finding.documentationClaim}\n+ ${finding.codeReality}`;
+  }
+}
+
+/**
+ * Compare two normalized contract bundles and produce deterministic findings.
+ *
+ * Checks per spec (Section 9):
+ *   1. Route check  — documented endpoint missing from implementation
+ *   2. Param check  — missing, renamed, or extra params on matched endpoints
+ *   3. Auth check   — contradictory auth schemes on matched endpoints
+ *   4. Response check — array vs object shape contradictions on matched endpoints
+ */
+export function compareContracts(
+  docEndpoints: ContractEndpoint[],
+  codeEndpoints: ContractEndpoint[],
+  docFile: string,
+  codeFile: string
+): DriftFinding[] {
+  const findings: DriftFinding[] = [];
+  let seq = 1;
+
+  function nextId(): string {
+    return `DRIFT-${String(seq++).padStart(3, "0")}`;
+  }
+
+  // Build lookup map for code endpoints by normalized key
+  const codeMap = new Map<string, ContractEndpoint>();
+  for (const ep of codeEndpoints) {
+    codeMap.set(endpointKey(ep), ep);
+  }
+
+  let totalChecks = 0;
+
+  for (const docEp of docEndpoints) {
+    const key = endpointKey(docEp);
+    const codeEp = codeMap.get(key);
+
+    // -- Route check ----------------------------------------------------------
+    totalChecks++;
+    if (!codeEp) {
+      // Documented endpoint has no matching implementation
+      findings.push({
+        id: nextId(),
+        type: "ROUTE_MISMATCH",
+        severity: "CRITICAL",
+        endpoint: key,
+        documentationFile: docFile,
+        documentationLine: docEp.lineNumber ?? 0,
+        documentationClaim: `${normalizeMethod(docEp.method)} ${docEp.path}`,
+        codeFile,
+        codeLine: 0,
+        codeReality: "Route not found in implementation",
+        explanation: `The documentation describes ${normalizeMethod(docEp.method)} ${docEp.path} but no matching handler was found in the source code.`,
+        proposedPatch: `- Route: ${normalizeMethod(docEp.method)} ${docEp.path} (remove or implement this endpoint)`,
+      });
+      continue; // Cannot check params/auth/response without a matching code endpoint
+    }
+
+    // -- Param check ----------------------------------------------------------
+    totalChecks++;
+    if (docEp.params.length > 0 && codeEp.params.length > 0) {
+      const docSet = new Set(docEp.params.map((p) => p.toLowerCase()));
+      const codeSet = new Set(codeEp.params.map((p) => p.toLowerCase()));
+
+      const missingInCode = [...docSet].filter((p) => !codeSet.has(p));
+      const missingInDoc = [...codeSet].filter((p) => !docSet.has(p));
+
+      if (missingInCode.length > 0 || missingInDoc.length > 0) {
+        const docClaim = `Request params: [${[...docSet].join(", ")}]`;
+        const codeReality = `Request params: [${[...codeSet].join(", ")}]`;
+        const f: DriftFinding = {
+          id: nextId(),
+          type: "PARAM_MISMATCH",
+          severity: "CRITICAL",
+          endpoint: key,
+          documentationFile: docFile,
+          documentationLine: docEp.lineNumber ?? 0,
+          documentationClaim: docClaim,
+          codeFile,
+          codeLine: codeEp.lineNumber ?? 0,
+          codeReality,
+          explanation: [
+            missingInCode.length > 0
+              ? `Documented params missing from implementation: ${missingInCode.join(", ")}.`
+              : "",
+            missingInDoc.length > 0
+              ? `Implementation params not documented: ${missingInDoc.join(", ")}.`
+              : "",
+          ]
+            .filter(Boolean)
+            .join(" "),
+          proposedPatch: "",
+        };
+        f.proposedPatch = buildProposedPatch(f);
+        findings.push(f);
+      }
+    }
+
+    // -- Auth check -----------------------------------------------------------
+    totalChecks++;
+    if (docEp.auth !== undefined && codeEp.auth !== undefined) {
+      const docAuth = normalizeAuth(docEp.auth);
+      const codeAuth = normalizeAuth(codeEp.auth);
+
+      const contradiction =
+        (docAuth === "cookie" && codeAuth === "bearer") ||
+        (docAuth === "bearer" && codeAuth === "cookie") ||
+        (docAuth === "bearer" && codeAuth === "apikey") ||
+        (docAuth === "apikey" && codeAuth === "bearer") ||
+        (docAuth === "none" && (codeAuth === "bearer" || codeAuth === "cookie" || codeAuth === "apikey")) ||
+        ((docAuth === "bearer" || docAuth === "cookie" || docAuth === "apikey") && codeAuth === "none");
+
+      if (contradiction) {
+        const f: DriftFinding = {
+          id: nextId(),
+          type: "AUTH_MISMATCH",
+          severity: "CRITICAL",
+          endpoint: key,
+          documentationFile: docFile,
+          documentationLine: docEp.lineNumber ?? 0,
+          documentationClaim: docEp.auth,
+          codeFile,
+          codeLine: codeEp.lineNumber ?? 0,
+          codeReality: codeEp.auth ?? "unknown",
+          explanation: `Documentation specifies ${docEp.auth} authentication but implementation uses ${codeEp.auth ?? "unknown"}.`,
+          proposedPatch: "",
+        };
+        f.proposedPatch = buildProposedPatch(f);
+        findings.push(f);
+      }
+    }
+
+    // -- Response check -------------------------------------------------------
+    totalChecks++;
+    if (docEp.responseShape !== undefined && codeEp.responseShape !== undefined) {
+      const contradiction =
+        (docEp.responseShape === "array" && codeEp.responseShape === "object") ||
+        (docEp.responseShape === "object" && codeEp.responseShape === "array");
+
+      if (contradiction) {
+        const f: DriftFinding = {
+          id: nextId(),
+          type: "RESPONSE_MISMATCH",
+          severity: "WARNING",
+          endpoint: key,
+          documentationFile: docFile,
+          documentationLine: docEp.lineNumber ?? 0,
+          documentationClaim: `Response shape: ${docEp.responseShape}`,
+          codeFile,
+          codeLine: codeEp.lineNumber ?? 0,
+          codeReality: `Response shape: ${codeEp.responseShape}`,
+          explanation: `Documentation describes a ${docEp.responseShape} response but implementation returns a ${codeEp.responseShape}.`,
+          proposedPatch: "",
+        };
+        f.proposedPatch = buildProposedPatch(f);
+        findings.push(f);
+      }
+    }
+  }
+
+  return findings;
+}
+
+// ---------------------------------------------------------------------------
+// Normalized audit report — Section 14 extended report
+// ---------------------------------------------------------------------------
+
+export interface NormalizedAuditReport extends AuditReport {
+  docEndpoints: ContractEndpoint[];
+  codeEndpoints: ContractEndpoint[];
+}
+
+/**
+ * Run a full normalized audit given pre-extracted contract bundles.
+ * Returns an AuditReport with repoMap and provenance-tagged endpoints.
+ */
+export function runNormalizedAudit(
+  docEndpoints: ContractEndpoint[],
+  codeEndpoints: ContractEndpoint[],
+  docFile: string,
+  codeFile: string,
+  targetRepository: string,
+  repoMap?: RepoMap
+): NormalizedAuditReport {
+  const findings = compareContracts(docEndpoints, codeEndpoints, docFile, codeFile);
+
+  // totalChecks = 4 categories × number of matched endpoints evaluated
+  const totalChecks = Math.max(
+    4,
+    docEndpoints.length > 0 ? docEndpoints.length * 4 : 4
+  );
 
   return {
     timestamp: new Date().toISOString(),
@@ -407,5 +651,8 @@ export function runDriftAudit(
     driftCount: findings.length,
     findings,
     isClean: findings.length === 0,
+    repoMap,
+    docEndpoints,
+    codeEndpoints,
   };
 }

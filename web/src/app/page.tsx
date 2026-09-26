@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import type { AuditReport, DriftFinding } from "@/lib/driftEngine";
+import type { AuditReport, DriftFinding, RepoMap } from "@/lib/driftEngine";
+import type { ContractEndpoint } from "@/types/contract";
 import { applyPatches, type UnifiedDiffLine } from "@/lib/patchEngine";
 
 // ---------------------------------------------------------------------------
@@ -11,6 +12,12 @@ import { applyPatches, type UnifiedDiffLine } from "@/lib/patchEngine";
 type AuditState = "idle" | "scanning" | "done" | "error";
 type PatchState = "idle" | "applying" | "reauditing" | "verified" | "error";
 type Mode = "demo" | "custom";
+
+// Extended report shape returned by Phase 3 normalized audit
+interface ExtendedAuditReport extends AuditReport {
+  docEndpoints?: ContractEndpoint[];
+  codeEndpoints?: ContractEndpoint[];
+}
 
 const DEMO_STEPS = [
   "Resolving target: dummy-auth-service",
@@ -35,11 +42,12 @@ function buildCustomSteps(repoUrl: string, docPath: string, codePath: string): r
   const label = repoUrl.replace("https://github.com/", "").replace(/\/$/, "") || "repo";
   return [
     `Resolving target: ${label}`,
-    `Fetching ${docPath} from raw.githubusercontent.com`,
-    `Fetching ${codePath} from raw.githubusercontent.com`,
-    "Parsing documentation contracts (routes, params, auth, responses)",
-    "Parsing code contracts (interfaces, handlers, response shapes)",
-    "Running drift comparison across 4 contract categories",
+    `Discovering repository tree via GitHub Trees API`,
+    `Fetching ${docPath}`,
+    `Fetching ${codePath}`,
+    "Extracting documentation contracts (hybrid: REGEX + Groq fallback)",
+    "Extracting code contracts (deterministic: AST/REGEX)",
+    "Running normalized drift comparison",
     "Generating findings with line-level provenance",
     "Audit complete",
   ] as const;
@@ -83,6 +91,26 @@ function IconChevron({ open }: { open: boolean }) {
 }
 
 // ---------------------------------------------------------------------------
+// Extraction method badge — Section 12
+// ---------------------------------------------------------------------------
+
+function ExtractionBadge({ method }: { method?: string }) {
+  if (!method) return null;
+  const colors: Record<string, string> = {
+    REGEX:   "border-blue-800 text-blue-400 bg-blue-950/40",
+    AST:     "border-violet-800 text-violet-400 bg-violet-950/40",
+    GROQ:    "border-amber-800 text-amber-400 bg-amber-950/40",
+    OPENAPI: "border-teal-800 text-teal-400 bg-teal-950/40",
+  };
+  const cls = colors[method] ?? "border-zinc-700 text-zinc-400 bg-zinc-900";
+  return (
+    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-mono border tracking-wider shrink-0 ${cls}`}>
+      {method}
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Severity badge
 // ---------------------------------------------------------------------------
 
@@ -116,7 +144,7 @@ function TypeBadge({ type }: { type: DriftFinding["type"] }) {
 }
 
 // ---------------------------------------------------------------------------
-// Single drift card
+// Single drift finding card — Section 14
 // ---------------------------------------------------------------------------
 
 function DriftCard({ finding }: { finding: DriftFinding }) {
@@ -133,7 +161,7 @@ function DriftCard({ finding }: { finding: DriftFinding }) {
         </div>
       </div>
 
-      {/* Side-by-side comparison — stacks on mobile */}
+      {/* Side-by-side evidence — Section 14 / Section 12 */}
       <div className="grid grid-cols-1 sm:grid-cols-2 sm:divide-x divide-zinc-800">
         {/* Doc side */}
         <div className="p-3 space-y-1.5 border-b border-zinc-800 sm:border-b-0">
@@ -183,15 +211,11 @@ function DriftCard({ finding }: { finding: DriftFinding }) {
 }
 
 // ---------------------------------------------------------------------------
-// Terminal stepper (shared between initial scan and re-audit)
+// Terminal stepper
 // ---------------------------------------------------------------------------
 
 function TerminalBox({
-  steps,
-  step,
-  done,
-  error,
-  label,
+  steps, step, done, error, label,
 }: {
   steps: readonly string[];
   step: number;
@@ -211,12 +235,8 @@ function TerminalBox({
     <div className="border border-zinc-800 rounded-sm overflow-hidden">
       <div className="flex items-center gap-2 px-3 py-2 bg-zinc-900 border-b border-zinc-800">
         <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest">{label}</span>
-        {done && !error && (
-          <span className="ml-auto text-[10px] font-mono text-emerald-400">exit 0</span>
-        )}
-        {error && (
-          <span className="ml-auto text-[10px] font-mono text-red-400">exit 1</span>
-        )}
+        {done && !error && <span className="ml-auto text-[10px] font-mono text-emerald-400">exit 0</span>}
+        {error && <span className="ml-auto text-[10px] font-mono text-red-400">exit 1</span>}
       </div>
       <div className="bg-zinc-950 px-3 py-3 font-mono text-xs space-y-1 min-h-32 max-h-56 overflow-y-auto">
         {visibleSteps.map((line, i) => {
@@ -227,10 +247,7 @@ function TerminalBox({
               <span className={isPast ? "text-emerald-500" : isCurrent ? "text-zinc-400 animate-pulse" : "text-zinc-700"}>
                 {isPast ? ">" : isCurrent ? ">" : " "}
               </span>
-              <span className={[
-                "break-all",
-                isPast ? "text-zinc-300" : isCurrent ? "text-zinc-400" : "text-zinc-700",
-              ].join(" ")}>
+              <span className={["break-all", isPast ? "text-zinc-300" : isCurrent ? "text-zinc-400" : "text-zinc-700"].join(" ")}>
                 {line}
               </span>
             </div>
@@ -249,7 +266,7 @@ function TerminalBox({
 }
 
 // ---------------------------------------------------------------------------
-// Unified diff viewer
+// Unified diff viewer — Section 14
 // ---------------------------------------------------------------------------
 
 function DiffViewer({ diff, docFile }: { diff: UnifiedDiffLine[]; docFile: string }) {
@@ -274,27 +291,15 @@ function DiffViewer({ diff, docFile }: { diff: UnifiedDiffLine[]; docFile: strin
           return (
             <div
               key={i}
-              className={[
-                "flex items-start font-mono text-[11px] leading-5",
-                isRemoved ? "bg-red-950/25" : isAdded ? "bg-emerald-950/25" : "",
-              ].join(" ")}
+              className={["flex items-start font-mono text-[11px] leading-5", isRemoved ? "bg-red-950/25" : isAdded ? "bg-emerald-950/25" : ""].join(" ")}
             >
-              <span className={[
-                "select-none w-10 shrink-0 text-right pr-3 border-r border-zinc-800 py-0.5",
-                isRemoved ? "text-red-700" : isAdded ? "text-emerald-700" : "text-zinc-700",
-              ].join(" ")}>
+              <span className={["select-none w-10 shrink-0 text-right pr-3 border-r border-zinc-800 py-0.5", isRemoved ? "text-red-700" : isAdded ? "text-emerald-700" : "text-zinc-700"].join(" ")}>
                 {lineNumStr}
               </span>
-              <span className={[
-                "w-4 shrink-0 text-center py-0.5",
-                isRemoved ? "text-red-500" : isAdded ? "text-emerald-500" : "text-zinc-700",
-              ].join(" ")}>
+              <span className={["w-4 shrink-0 text-center py-0.5", isRemoved ? "text-red-500" : isAdded ? "text-emerald-500" : "text-zinc-700"].join(" ")}>
                 {isRemoved ? "-" : isAdded ? "+" : " "}
               </span>
-              <span className={[
-                "flex-1 py-0.5 pr-3 whitespace-pre-wrap break-all",
-                isRemoved ? "text-red-300" : isAdded ? "text-emerald-300" : "text-zinc-500",
-              ].join(" ")}>
+              <span className={["flex-1 py-0.5 pr-3 whitespace-pre-wrap break-all", isRemoved ? "text-red-300" : isAdded ? "text-emerald-300" : "text-zinc-500"].join(" ")}>
                 {line.content}
               </span>
             </div>
@@ -306,10 +311,148 @@ function DiffViewer({ diff, docFile }: { diff: UnifiedDiffLine[]; docFile: strin
 }
 
 // ---------------------------------------------------------------------------
+// Repository map panel — Section 13
+// ---------------------------------------------------------------------------
+
+function RepoMapPanel({ map }: { map: RepoMap }) {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <section className="border border-zinc-800 rounded-sm overflow-hidden">
+      <button
+        className="w-full flex items-center justify-between gap-3 px-3 py-2 bg-zinc-900 border-b border-zinc-800 hover:bg-zinc-800/60 transition-colors"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+      >
+        <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest">Repository Map</span>
+        <div className="flex items-center gap-3">
+          {map.wasCapped && (
+            <span className="text-[9px] font-mono text-amber-500 border border-amber-800 bg-amber-950/30 px-1.5 py-0.5 rounded">
+              CAPPED AT {map.cappedAt}
+            </span>
+          )}
+          <span className="text-zinc-500"><IconChevron open={expanded} /></span>
+        </div>
+      </button>
+
+      {/* Always-visible summary row */}
+      <div className="px-3 py-2 bg-zinc-950 flex flex-wrap gap-x-5 gap-y-1.5 border-b border-zinc-800">
+        <MapStat label="Files discovered" value={String(map.totalFilesDiscovered)} />
+        <MapStat label="Doc files" value={String(map.docFiles.length)} />
+        <MapStat label="Source files" value={String(map.sourceFiles.length)} />
+        <MapStat label="Languages" value={map.languages.join(", ") || "—"} />
+        <MapStat label="Extraction" value={map.extractionMethods.join(", ") || "—"} />
+      </div>
+
+      {expanded && (
+        <div className="px-3 py-3 bg-zinc-950 space-y-3">
+          {map.docFiles.length > 0 && (
+            <MapFileList label="Documentation files" files={map.docFiles} />
+          )}
+          {map.sourceFiles.length > 0 && (
+            <MapFileList label="API source files" files={map.sourceFiles} />
+          )}
+          {map.ignoredDirs.length > 0 && (
+            <div>
+              <p className="text-[9px] font-mono text-zinc-600 uppercase tracking-widest mb-1">Ignored directories</p>
+              <p className="font-mono text-[10px] text-zinc-500">{map.ignoredDirs.join(", ")}</p>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function MapStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="text-[9px] font-mono text-zinc-600 uppercase tracking-widest">{label}</span>
+      <span className="text-[10px] font-mono text-zinc-300">{value}</span>
+    </div>
+  );
+}
+
+function MapFileList({ label, files }: { label: string; files: string[] }) {
+  return (
+    <div>
+      <p className="text-[9px] font-mono text-zinc-600 uppercase tracking-widest mb-1">{label}</p>
+      <ul className="space-y-0.5">
+        {files.map((f) => (
+          <li key={f} className="font-mono text-[10px] text-zinc-400">{f}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Contract surface panel — Section 12 & 14
+// ---------------------------------------------------------------------------
+
+function ContractSurface({
+  docEndpoints,
+  codeEndpoints,
+}: {
+  docEndpoints: ContractEndpoint[];
+  codeEndpoints: ContractEndpoint[];
+}) {
+  const [expanded, setExpanded] = useState(false);
+  if (docEndpoints.length === 0 && codeEndpoints.length === 0) return null;
+
+  return (
+    <section className="border border-zinc-800 rounded-sm overflow-hidden">
+      <button
+        className="w-full flex items-center justify-between gap-3 px-3 py-2 bg-zinc-900 border-b border-zinc-800 hover:bg-zinc-800/60 transition-colors"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+      >
+        <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest">
+          Contract Surface — {docEndpoints.length} doc · {codeEndpoints.length} code
+        </span>
+        <span className="text-zinc-500"><IconChevron open={expanded} /></span>
+      </button>
+
+      {expanded && (
+        <div className="divide-y divide-zinc-800/60">
+          {docEndpoints.length > 0 && (
+            <EndpointTable label="Documentation contracts" endpoints={docEndpoints} />
+          )}
+          {codeEndpoints.length > 0 && (
+            <EndpointTable label="Implementation contracts" endpoints={codeEndpoints} />
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function EndpointTable({ label, endpoints }: { label: string; endpoints: ContractEndpoint[] }) {
+  return (
+    <div className="px-3 py-3 bg-zinc-950">
+      <p className="text-[9px] font-mono text-zinc-600 uppercase tracking-widest mb-2">{label}</p>
+      <div className="space-y-1.5">
+        {endpoints.map((ep, i) => (
+          <div key={i} className="flex flex-wrap items-center gap-1.5 font-mono text-[10px]">
+            <span className="text-zinc-500 font-semibold w-14 shrink-0">{ep.method}</span>
+            <span className="text-zinc-300 flex-1 min-w-0 truncate">{ep.path}</span>
+            {ep.auth && <span className="text-zinc-500 shrink-0">{ep.auth}</span>}
+            {ep.lineNumber && (
+              <span className="text-zinc-600 shrink-0">:{ep.lineNumber}</span>
+            )}
+            <ExtractionBadge method={ep.extractionMethod} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Audit summary bar
 // ---------------------------------------------------------------------------
 
-function AuditSummary({ report }: { report: AuditReport }) {
+function AuditSummary({ report }: { report: ExtendedAuditReport }) {
   return (
     <div className="border border-zinc-800 rounded-sm bg-zinc-900 px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-2">
       <div className="flex items-center gap-2">
@@ -322,11 +465,11 @@ function AuditSummary({ report }: { report: AuditReport }) {
           {report.isClean ? "No drift detected" : `${report.driftCount} drift${report.driftCount !== 1 ? "s" : ""} detected`}
         </span>
       </div>
-      <span className="text-zinc-700 select-none hidden sm:inline">|</span>
+      <Divider />
       <Stat label="Repository" value={report.targetRepository} mono />
-      <span className="text-zinc-700 select-none hidden sm:inline">|</span>
+      <Divider />
       <Stat label="Checks run" value={String(report.totalChecks)} mono />
-      <span className="text-zinc-700 select-none hidden sm:inline">|</span>
+      <Divider />
       <Stat label="Timestamp" value={new Date(report.timestamp).toISOString()} mono />
     </div>
   );
@@ -346,7 +489,7 @@ function Stat({ label, value, mono }: { label: string; value: string; mono?: boo
 }
 
 // ---------------------------------------------------------------------------
-// Verified clean banner
+// Verified clean banner — Section 11
 // ---------------------------------------------------------------------------
 
 function VerifiedBanner({ report }: { report: AuditReport }) {
@@ -379,23 +522,27 @@ function VerifiedBanner({ report }: { report: AuditReport }) {
 const FAQ_ITEMS = [
   {
     q: "How does Parity detect drift without running the service?",
-    a: "Parity performs static analysis only. It reads Markdown documentation and TypeScript source files as plain text, extracts contracts via regex-based parsing (routes, parameter names, auth schemes, response shapes), and compares them deterministically. No server is started, no network requests are made.",
+    a: "Parity performs static analysis only. It reads documentation and source files as plain text, extracts contracts via deterministic regex and AST-level parsing, and compares them. No server is started, no network requests to the audited service are made.",
   },
   {
     q: "What are the four supported drift classifications?",
-    a: "ROUTE_MISMATCH: the documented HTTP method or path differs from the code. PARAM_MISMATCH: a documented request body field name is absent or renamed in the handler. AUTH_MISMATCH: the documented authentication scheme (e.g. session cookie) contradicts the code (e.g. Bearer JWT). RESPONSE_MISMATCH: the documented response shape (raw array vs. wrapped object) differs from what the handler actually returns.",
+    a: "ROUTE_MISMATCH: a documented endpoint is absent from the implementation. PARAM_MISMATCH: request body field names differ between documentation and handler. AUTH_MISMATCH: authentication scheme contradicts (e.g. cookie vs Bearer JWT). RESPONSE_MISMATCH: response shape contradicts (raw array vs wrapped object).",
   },
   {
     q: "Where do the line numbers come from?",
-    a: "Every finding carries exact 1-based line numbers for both the documentation file and the code file. The parser tracks line offsets while scanning and records the specific line at which each claim or reality was found — there are no approximations or averages.",
+    a: "Every finding carries exact 1-based line numbers for both the documentation file and the code file. Extractors track line offsets while scanning and record the specific line at which each claim or implementation reality was found.",
   },
   {
-    q: "Which GitHub repositories can I audit?",
-    a: "Any public GitHub repository. Paste a URL such as https://github.com/owner/repo. Parity fetches the raw files from raw.githubusercontent.com, probing the main branch first then master as fallback. Private repositories are not supported.",
+    q: "How does extraction provenance work?",
+    a: "Each contract endpoint is tagged with its extraction method: REGEX (deterministic pattern matching), AST (TypeScript/JavaScript static analysis), GROQ (targeted LLM extraction for ambiguous prose — fallback only), or OPENAPI (parsed from a spec file). The drift engine never uses Groq to decide whether drift exists.",
   },
   {
     q: "How does the patch-and-re-audit loop work?",
-    a: "When you click Apply Recommended Patches, the patch engine runs entirely in the browser. It applies verbatim string replacements to the in-memory documentation, generates a unified diff, and sends the patched content to /api/audit as patchedDocContent. The server re-runs the drift engine against the patched doc and the original code. No files on disk are modified.",
+    a: "When you click Apply Recommended Patches, the patch engine runs in-memory. It applies verbatim string replacements to the documentation, generates a unified diff, and sends the patched content to the audit API as patchedDocContent. The server re-runs the drift engine against the patched doc and original code. No disk files are modified.",
+  },
+  {
+    q: "Which GitHub repositories can I audit?",
+    a: "Any public GitHub repository. Parity uses the GitHub Trees API for a single repository discovery request, then fetches only the selected files. The crawl is bounded to 10 source files and 5 documentation files per audit.",
   },
 ] as const;
 
@@ -404,9 +551,7 @@ function FaqAccordion() {
 
   return (
     <section>
-      <h2 className="text-xs font-mono text-zinc-500 uppercase tracking-widest mb-3">
-        How It Works
-      </h2>
+      <h2 className="text-xs font-mono text-zinc-500 uppercase tracking-widest mb-3">How It Works</h2>
       <div className="border border-zinc-800 rounded-sm divide-y divide-zinc-800">
         {FAQ_ITEMS.map((item, i) => (
           <div key={i}>
@@ -416,14 +561,10 @@ function FaqAccordion() {
               aria-expanded={open === i}
             >
               <span className="text-sm text-zinc-200">{item.q}</span>
-              <span className="text-zinc-500 shrink-0">
-                <IconChevron open={open === i} />
-              </span>
+              <span className="text-zinc-500 shrink-0"><IconChevron open={open === i} /></span>
             </button>
             {open === i && (
-              <div className="px-4 pb-4 text-sm text-zinc-400 leading-6 bg-zinc-900/30">
-                {item.a}
-              </div>
+              <div className="px-4 pb-4 text-sm text-zinc-400 leading-6 bg-zinc-900/30">{item.a}</div>
             )}
           </div>
         ))}
@@ -445,7 +586,7 @@ export default function Home() {
   const [auditState, setAuditState] = useState<AuditState>("idle");
   const [scanSteps, setScanSteps] = useState<readonly string[]>(DEMO_STEPS);
   const [scanStep, setScanStep] = useState(0);
-  const [report, setReport] = useState<AuditReport | null>(null);
+  const [report, setReport] = useState<ExtendedAuditReport | null>(null);
   const [originalDoc, setOriginalDoc] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -456,15 +597,43 @@ export default function Home() {
   const [verifiedReport, setVerifiedReport] = useState<AuditReport | null>(null);
   const [patchErrorMsg, setPatchErrorMsg] = useState<string | null>(null);
 
+  /** Full reset — clears all audit, patch, and map state per Section 2.A. */
   function resetState() {
     setReport(null);
     setOriginalDoc(null);
     setErrorMsg(null);
     setScanStep(0);
     setPatchState("idle");
+    setPatchStep(0);
     setDiff([]);
     setVerifiedReport(null);
     setPatchErrorMsg(null);
+  }
+
+  /** Clear All — resets inputs and all derived state (Section 2.A). */
+  function clearAll() {
+    setRepoUrl("");
+    setCustomDocPath("README.md");
+    setCustomCodePath("src/auth.ts");
+    setAuditState("idle");
+    setScanSteps(DEMO_STEPS);
+    resetState();
+  }
+
+  /**
+   * Sanitize a GitHub repo URL to its canonical root form.
+   * Strips /blob/, /tree/, .git suffix, and trailing slashes (Section 2.B).
+   */
+  function sanitizeRepoUrl(url: string): string {
+    try {
+      const u = new URL(url.trim());
+      if (u.hostname !== "github.com") return url.trim();
+      const parts = u.pathname.replace(/^\//, "").replace(/\.git$/, "").split("/");
+      if (parts.length < 2 || !parts[0] || !parts[1]) return url.trim();
+      return `https://github.com/${parts[0]}/${parts[1]}`;
+    } catch {
+      return url.trim();
+    }
   }
 
   async function runAudit() {
@@ -525,7 +694,7 @@ export default function Home() {
         throw new Error(data.error ?? `HTTP ${res.status}`);
       }
 
-      const data = (await res.json()) as AuditReport;
+      const data = (await res.json()) as ExtendedAuditReport;
       setScanStep(totalSteps);
       setReport(data);
       setAuditState("done");
@@ -635,26 +804,31 @@ export default function Home() {
       {/* Nav */}
       <nav className="border-b border-zinc-800 bg-zinc-950 sticky top-0 z-10">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 h-11 flex items-center justify-between">
-          <span className="font-mono text-sm font-semibold tracking-tight text-white">
-            Parity
-          </span>
-          <div className="flex items-center gap-1.5">
-            <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500" />
-            <span className="font-mono text-[11px] text-zinc-500">System Ready</span>
+          <span className="font-mono text-sm font-semibold tracking-tight text-white">Parity</span>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={clearAll}
+              disabled={isBusy}
+              className="font-mono text-[11px] text-zinc-500 hover:text-zinc-300 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              Clear All
+            </button>
+            <div className="flex items-center gap-1.5">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500" />
+              <span className="font-mono text-[11px] text-zinc-500">System Ready</span>
+            </div>
           </div>
         </div>
       </nav>
 
-      {/* Main — flex-1 pushes footer to bottom */}
+      {/* Main */}
       <main className="flex-1 max-w-5xl w-full mx-auto px-4 sm:px-6 py-8 space-y-8">
 
         {/* Header */}
         <header className="space-y-1">
-          <h1 className="text-lg font-semibold tracking-tight text-white">
-            Documentation Drift Audit
-          </h1>
+          <h1 className="text-lg font-semibold tracking-tight text-white">Documentation Drift Audit</h1>
           <p className="text-sm text-zinc-500">
-            Static contract verification — documentation vs. TypeScript route handlers.
+            Evidence-backed contract verification — documentation vs. source code.
           </p>
         </header>
 
@@ -666,9 +840,7 @@ export default function Home() {
               onClick={() => { setMode(m); resetState(); setAuditState("idle"); }}
               className={[
                 "px-4 h-8 font-mono text-xs font-semibold transition-colors",
-                mode === m
-                  ? "bg-zinc-800 text-white"
-                  : "bg-zinc-950 text-zinc-500 hover:text-zinc-300",
+                mode === m ? "bg-zinc-800 text-white" : "bg-zinc-950 text-zinc-500 hover:text-zinc-300",
                 m === "custom" ? "border-l border-zinc-800" : "",
               ].join(" ")}
             >
@@ -707,6 +879,7 @@ export default function Home() {
                 type="url"
                 value={repoUrl}
                 onChange={(e) => setRepoUrl(e.target.value)}
+                onBlur={(e) => setRepoUrl(sanitizeRepoUrl(e.target.value))}
                 placeholder="https://github.com/owner/repo"
                 disabled={isBusy}
                 className="flex-1 h-9 px-3 rounded-sm border border-zinc-800 bg-zinc-900 font-mono text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-zinc-600 disabled:opacity-50 min-w-0"
@@ -751,7 +924,7 @@ export default function Home() {
           </section>
         )}
 
-        {/* Initial scan terminal */}
+        {/* Execution log */}
         {auditState !== "idle" && (
           <TerminalBox
             steps={scanSteps}
@@ -762,17 +935,30 @@ export default function Home() {
           />
         )}
 
+        {/* Repository map — Section 13 */}
+        {report?.repoMap && auditState === "done" && (
+          <RepoMapPanel map={report.repoMap} />
+        )}
+
         {/* Audit summary */}
         {report && auditState === "done" && (
           <AuditSummary report={report} />
         )}
 
-        {/* Drift matrix */}
+        {/* Contract surface — Section 12 & 14 */}
+        {report && auditState === "done" && (report.docEndpoints || report.codeEndpoints) && (
+          <ContractSurface
+            docEndpoints={report.docEndpoints ?? []}
+            codeEndpoints={report.codeEndpoints ?? []}
+          />
+        )}
+
+        {/* Drift findings matrix — Section 14 */}
         {report && auditState === "done" && report.findings.length > 0 && (
           <section className="space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <h2 className="text-xs font-mono text-zinc-500 uppercase tracking-widest">
-                Drift Matrix — {report.driftCount} finding{report.driftCount !== 1 ? "s" : ""}
+                Findings — {report.driftCount} drift{report.driftCount !== 1 ? "s" : ""}
               </h2>
               {canPatch && (
                 <button
@@ -794,7 +980,7 @@ export default function Home() {
           </section>
         )}
 
-        {/* Clean state (initial audit returned 0 findings) */}
+        {/* Clean state */}
         {report && auditState === "done" && report.isClean && patchState === "idle" && (
           <div className="border border-zinc-800 rounded-sm bg-zinc-900 px-4 py-6 flex items-center gap-3">
             <span className="text-emerald-400"><IconCheck /></span>
@@ -804,7 +990,7 @@ export default function Home() {
           </div>
         )}
 
-        {/* Error state (initial audit) */}
+        {/* Error state */}
         {auditState === "error" && errorMsg && (
           <div className="border border-red-900 rounded-sm bg-red-950/20 px-4 py-3 flex items-start gap-2">
             <span className="text-red-400 mt-0.5 shrink-0"><IconAlert /></span>
@@ -812,7 +998,7 @@ export default function Home() {
           </div>
         )}
 
-        {/* Patch section */}
+        {/* Patch & verification section — Section 11 */}
         {patchState !== "idle" && (
           <section className="space-y-4">
             <h2 className="text-xs font-mono text-zinc-500 uppercase tracking-widest">
@@ -827,9 +1013,7 @@ export default function Home() {
               label="Re-audit Log"
             />
 
-            {diff.length > 0 && (
-              <DiffViewer diff={diff} docFile={diffDocFile} />
-            )}
+            {diff.length > 0 && <DiffViewer diff={diff} docFile={diffDocFile} />}
 
             {patchState === "verified" && verifiedReport && (
               <VerifiedBanner report={verifiedReport} />
@@ -849,14 +1033,14 @@ export default function Home() {
 
       </main>
 
-      {/* Footer — docks to bottom via flex-col on outer wrapper */}
+      {/* Footer */}
       <footer className="border-t border-zinc-800">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 py-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-1">
           <span className="font-mono text-[11px] text-zinc-600">
-            Parity — stateless documentation drift verification
+            Parity — evidence-backed documentation drift verification
           </span>
           <span className="font-mono text-[11px] text-zinc-700">
-            offline-first · deterministic · zero external deps
+            deterministic · offline-first · zero fabricated metrics
           </span>
         </div>
       </footer>
@@ -866,8 +1050,7 @@ export default function Home() {
 }
 
 // ---------------------------------------------------------------------------
-// Demo doc fallback (used when /api/audit-source is unavailable)
-// Mirrors dummy-auth-service/README.md exactly so patchEngine can operate.
+// Demo doc fallback (used when audit-source is unavailable)
 // ---------------------------------------------------------------------------
 
 const DEMO_DOC_FALLBACK = `# Auth & User Service API (v1.2.0)
